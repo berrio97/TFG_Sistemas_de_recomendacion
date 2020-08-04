@@ -1,0 +1,594 @@
+---
+title: "Sistemas de recomendación"
+author: "Álvaro Berrío Galindo"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(include = TRUE)
+```
+
+Este documento contiene la implementación de un sistema de recomendación creado a partir de un filtro colaborativo basado en la factorización de matrices.
+\break
+
+Esta función se encarga de crear los dos conjuntos de datos de entrenamiento y prueba. Se realiza escogiendo un porcentaje de películas de cada usuario como test de manera que todos los usuarios están representados con un tamaño proporcional.
+
+```{r train test split}
+funcion_train_test<-function(ratings,n,m){
+  train<-ratings
+  test<-matrix(rep(NA,n*m),ncol=m)
+  
+  for(i in 1:n){
+    rated_items<-which(!is.na(ratings[i,]))
+    items_sample<-sample(rated_items,round(length(rated_items)*0.1))
+    
+    train[i,items_sample]<-NA
+    test[i,items_sample]<-ratings[i,items_sample]
+  }
+  return(list(train,test))
+}
+```
+
+
+Esta función se encarga de calcular y devolver la raíz cuadrada del error cuadrático medio según los parámetros propios del modelo de factorización de matrices con sesgos para usuarios e items.
+
+```{r calculate rmse}
+calculate_error<-function(data,u,v,mu,bi,bj){
+  predicted<-pred(u,v,mu,bi,bj)
+  error<-mean((data[!is.na(data)]-predicted[!is.na(data)])**2)
+  return(sqrt(error))
+}
+```
+
+
+Aquí se hallan las predicciones de todos los ratings, aunque solo interesan los correspondientes al conjunto de test para calcular el RECM. Para conseguir las predicciones:
+$$r_{ij} = u_i \cdot v_j +mu + b_i + b_j $$
+```{r predictions}
+pred<-function(u,v,mu,bi,bj){
+  aux<-u%*%v+mu
+  n<-dim(u)[1]
+  m<-dim(v)[2]
+  mat_bi<-matrix(rep(bi,each=m),nrow=n,byrow=T)
+  mat_bj<-matrix(rep(bj,each=n),ncol=m)
+  res<-aux+mat_bi+mat_bj
+  res[res>5]<-5
+  res[res<0]<-0
+  return(res)
+}
+```
+
+
+Esta función contiene el propio algoritmo con el descenso estocástico de gradiente. Para cada factor, se inicializan las matrices de $\textbf{U}$ y $\textbf{V}$ de forma aleatoria así como los vectores de sesgos $b_i$ y $b_j$. Se realizan un número de iteraciones sobre todas las observaciones del conjunto de entrenamiento (épocas). Para cada una de estas observaciones, se actualizan los valores de U, V, $b_i$ y $b_j$ mediante las ecuaciones del SGD. Después se actualiza el factor de aprendizaje y se calcula el RECM. Si este error es el más pequeño hasta el momento, se actualizan los valores de las matrices y vectores que devolverá la función y si la diferencia entre el error del paso actual y el anterior es muy pequeña, se para esa iteración.
+
+```{r algorithm}
+algorithm<-function(train,test,steps,factor,gamma,lambda,n,m){
+  mu<-mean(train[!is.na(train)])
+  error<-rep(NA,steps)
+  best_u<-0
+  best_v<-0
+  best_bi<-0
+  best_bj<-0
+  minim<-1000
+  mult<-0.99
+  cat("\n",factor," factores\n")
+  u<-matrix(runif(n*factor),nrow = n)
+  v<-matrix(runif(factor*m),ncol = m)
+  bi<-rep(0,n)
+  bj<-rep(0,m)
+  learning<-gamma
+  for(s in 1:steps){
+    user_sample<-sample(n)
+    for(i in user_sample){
+    item_sample<-sample(which(!is.na(train[i,])))
+      for(j in item_sample){
+        r_ij<-u[i,]%*%v[,j]+mu+bi[i]+bj[j]
+        e_ij<-train[i,j]-r_ij
+        bi[i]<-bi[i]+learning*(c(e_ij)-lambda*bi[i])
+        bj[j]<-bj[j]+learning*(c(e_ij)-lambda*bj[j])
+        u[i,]<-u[i,]+learning*(c(e_ij)*v[,j]-lambda*u[i,])
+        v[,j]<-v[,j]+learning*(c(e_ij)*u[i,]-lambda*v[,j])
+      }
+    } 
+    learning<-learning*mult
+    error[s]<-calculate_error(test,u,v,mu,bi,bj)
+    if(error[s]<minim){
+      minim<-error[s]
+      best_u<-u
+      best_v<-v
+      best_bi<-bi
+      best_bj<-bj
+    }
+    if(s%%10==0 ||s==1){
+      cat("\tIteration: ",s)
+      cat("\n\t\tError: ",error[s],"\n")
+    }
+    if(s>1){
+      if(abs(error[s]-error[s-1])<0.00001){
+        error[(s+1):steps]<-error[s]
+        cat("\n\tIteration: ",s)
+        cat("\n\t\tError: ",error[s])
+        break;
+      }
+    }
+  }
+  return(list(error,best_u,best_v,mu,best_bi,best_bj))
+}
+```
+
+```{r}
+exec<-function(steps,fact,gam,lam,n,m,ex){
+  for(f in fact){
+    for(i in gam){
+      for(j in lam){
+        for(e in 1:ex){
+          t<-funcion_train_test(ratings,n,m)
+          train<-t[[1]]
+          test<-t[[2]]
+          cat("\ngamma:", i, ", lambda: ",j)
+          result<-algorithm(train,test,steps,f,i,j,n,m)
+          assign(paste("res",f,i,j,e,sep="_"),result,pos=1)
+        }
+      }
+    }
+  }
+}
+```
+
+
+## EJECUCIÓN
+
+Se leen los datos y se elimina la última columna referente al momento en que se realizó cada valoración ya que es una información que no se va a utilizar y cuanto más ligero sea el archivo, menos tiempo se tardará en ejecutar.
+```{r load data}
+data<-read.table("C:/Users/PC/Dropbox/5Indat/2o Cuatri/TFG Estadística/ml-latest-small/ratings.csv",sep=",",header = T)
+r<-data[,-4]
+```
+
+
+Se hallan el número de usuarios e items diferentes y se calcula el orden en qué aparecen ya que en el archivo original hay identificadores de películas que no aparecen, es decir, puede haber un salto de la película 10 a la 12, por ejemplo. Después, se lleva la información del archivo a una matriz dispersa que tiene tantas filas como usuarios y columnas como items.
+```{r transform data}
+n<-length(unique(r[,1]))
+m<-length(unique(r[,2]))
+
+user_order<-sort(unique(r[,1]))
+item_order<-sort(unique(r[,2]))
+
+ratings<-matrix(rep(NA,n*m),ncol=m)
+
+for(i in 1:nrow(r)){
+  ratings[which(item_order==r[i,1]),which(item_order==r[i,2])]<-r[i,3]
+}
+```
+
+
+```{r}
+factors<-c(5,30,100)
+gammas<-seq(0.015,0.03,0.005)
+lambdas<-seq(0.1,0.25,0.05)
+steps<-50
+execs<-5
+exec(steps,factors,gammas,lambdas,n,m,execs)
+```
+
+
+```{r}
+errores<-data.frame(factores=c(),gamma=c(),lambda=c(),error=c())
+for(f in 1:length(factors)){
+  for(i in 1:length(gammas)){
+    for(j in 1:length(lambdas)){
+      err_vec<-c()
+      results<-paste("res",factors[f],gammas[i],lambdas[j],1:execs,sep="_")
+      for(r in results){
+        err_vec<-c(err_vec,min(get(r)[[1]]))
+      }
+      err<-mean(err_vec)
+      errores<-rbind(errores,data.frame(factores=factors[f],gamma=gammas[i],lambda = lambdas[j],error=err))
+    }
+  }
+}
+```
+
+
+
+
+```{r}
+library(ggplot2)
+```
+
+```{r}
+err5<-errores[(errores$factores==5),]
+ggplot(err5,aes(x=lambda,y=error,color=factor(gamma))) + geom_line() +labs(title="5 factores latentes",y='RECM',color="gamma")+theme(plot.title = element_text(hjust = 0.5))+ coord_cartesian(ylim = range(errores$error))
+```
+
+```{r}
+err30<-errores[(errores$factores==30),]
+ggplot(err30,aes(x=lambda,y=error,color=factor(gamma))) + geom_line() +labs(title="30 factores latentes",y='RECM',color="gamma")+theme(plot.title = element_text(hjust = 0.5))+ coord_cartesian(ylim = range(errores$error))
+```
+
+```{r}
+err100<-errores[(errores$factores==100),]
+ggplot(err100,aes(x=lambda,y=error,color=factor(gamma))) + geom_line() +labs(title="100 factores latentes",y='RECM',color="gamma")+theme(plot.title = element_text(hjust = 0.5))+ coord_cartesian(ylim = range(errores$error))
+```
+
+
+```{r}
+t<-funcion_train_test(ratings,n,m)
+train<-t[[1]]
+test<-t[[2]]
+
+
+res3<-algorithm(train,test,100,c(100),c(0.020),c(0.10),n,m)
+pred3<-pred(res3[[2]],res3[[3]],res3[[4]],res3[[5]],res3[[6]])
+#pred3[pred3>5]<-5
+#pred3[pred3<0]<-0
+cat("3º, correlacion: ",cor(test[!is.na(test)],pred3[!is.na(test)]))
+
+res2<-algorithm(train,test,100,c(30),c(0.025),c(0.15),n,m)
+pred2<-pred(res2[[2]],res2[[3]],res2[[4]],res2[[5]],res2[[6]])
+#pred2[pred2>5]<-5
+#pred2[pred2<0]<-0
+cat("2º, correlacion: ",cor(test[!is.na(test)],pred2[!is.na(test)]))
+
+res1<-algorithm(train,test,100,c(30),c(0.030),c(0.15),n,m)
+pred1<-pred(res1[[2]],res1[[3]],res1[[4]],res1[[5]],res1[[6]])
+#pred1[pred1>5]<-5
+#pred1[pred1<0]<-0
+cat("1º, correlacion: ",cor(test[!is.na(test)],pred1[!is.na(test)]))
+
+```
+
+```{r}
+df<-data.frame(modelo=rep(1:3,each=100),steps=rep(1:100,3),error=c(res1[[1]],res2[[1]],res3[[1]]))
+ggplot(df,aes(x=steps,y=error,color=factor(modelo))) + geom_line() +labs(title="Mejores modelos",y='RECM',color="Modelo")+theme(plot.title = element_text(hjust = 0.5))+ coord_cartesian(ylim = range(df$error))
+
+```
+
+
+```{r}
+df2<-df[df$steps>75,]
+ggplot(df2,aes(x=steps,y=error,color=factor(modelo))) + geom_line() +labs(title="Mejores modelos",y='RECM',color="Modelo")+theme(plot.title = element_text(hjust = 0.5))+ coord_cartesian(ylim = range(df2$error))
+```
+
+### 1.b Evaluación de un usuario como ejemplo
+
+```{r user example}
+movies<-read.csv("C:/Users/PC/Dropbox/5Indat/2o Cuatri/TFG Estadística/ml-latest-small/movies.csv",sep=",",header = T)
+```
+#### User 1
+```{r}
+print(movies[match(item_order[which(test[1,]>4)],movies[,1]),2:3])
+
+userExample1.1<-pred1[1,]
+notNan1.1<-userExample1.1[!is.na(test[1,])]
+best_films_userExample1.1<-match(sort(notNan1.1[notNan1.1>4],decreasing=T),userExample1.1)
+bestFilmsIndex1.1<-item_order[best_films_userExample1.1]
+
+bestFilmsNames1.1<-movies[match(bestFilmsIndex1.1,movies[,1]),2:3]
+print(bestFilmsNames1.1)
+
+userExample1.2<-pred2[1,]
+notNan1.2<-userExample1.2[!is.na(test[1,])]
+best_films_userExample1.2<-match(sort(notNan1.2[notNan1.2>4],decreasing=T),userExample1.2)
+bestFilmsIndex1.2<-item_order[best_films_userExample1.2]
+
+bestFilmsNames1.2<-movies[match(bestFilmsIndex1.2,movies[,1]),2:3]
+print(bestFilmsNames1.2)
+
+userExample1.3<-pred3[1,]
+notNan1.3<-userExample1.3[!is.na(test[1,])]
+best_films_userExample1.3<-match(sort(notNan1.3[notNan1.3>4],decreasing=T),userExample1.3)
+bestFilmsIndex1.3<-item_order[best_films_userExample1.3]
+
+bestFilmsNames1.3<-movies[match(bestFilmsIndex1.3,movies[,1]),2:3]
+print(bestFilmsNames1.3)
+
+```
+
+#### User 2
+```{r}
+print(movies[match(item_order[which(test[315,]>4)],movies[,1]),2:3])
+
+userExample2.1<-pred1[315,]
+notNan2.1<-userExample2.1[!is.na(test[315,])]
+best_films_userExample2.1<-match(sort(notNan2.1[notNan2.1>4],decreasing=T),userExample2.1)
+bestFilmsIndex2.1<-item_order[best_films_userExample2.1]
+
+bestFilmsNames2.1<-movies[match(bestFilmsIndex2.1,movies[,1]),2:3]
+print(bestFilmsNames2.1)
+
+userExample2.2<-pred2[315,]
+notNan2.2<-userExample2.2[!is.na(test[315,])]
+best_films_userExample2.2<-match(sort(notNan2.2[notNan2.2>4],decreasing=T),userExample2.2)
+bestFilmsIndex2.2<-item_order[best_films_userExample2.2]
+
+bestFilmsNames2.2<-movies[match(bestFilmsIndex2.2,movies[,1]),2:3]
+print(bestFilmsNames2.2)
+
+userExample2.3<-pred3[315,]
+notNan2.3<-userExample2.3[!is.na(test[315,])]
+best_films_userExample2.3<-match(sort(notNan2.3[notNan2.3>4],decreasing=T),userExample2.3)
+bestFilmsIndex2.3<-item_order[best_films_userExample2.3]
+
+bestFilmsNames2.3<-movies[match(bestFilmsIndex2.3,movies[,1]),2:3]
+print(bestFilmsNames2.3)
+
+```
+
+
+#### User 3
+```{r}
+print(movies[match(item_order[which(test[512,]>4)],movies[,1]),2:3])
+
+userExample3.1<-pred1[512,]
+notNan3.1<-userExample3.1[!is.na(test[512,])]
+best_films_userExample3.1<-match(sort(notNan3.1[notNan3.1>4],decreasing=T),userExample3.1)
+bestFilmsIndex3.1<-item_order[best_films_userExample3.1]
+
+bestFilmsNames3.1<-movies[match(bestFilmsIndex3.1,movies[,1]),2:3]
+print(bestFilmsNames3.1)
+
+userExample3.2<-pred2[512,]
+notNan3.2<-userExample3.2[!is.na(test[512,])]
+best_films_userExample3.2<-match(sort(notNan3.2[notNan3.2>4],decreasing=T),userExample3.2)
+bestFilmsIndex3.2<-item_order[best_films_userExample3.2]
+
+bestFilmsNames3.2<-movies[match(bestFilmsIndex3.2,movies[,1]),2:3]
+print(bestFilmsNames3.2)
+
+userExample3.3<-pred3[512,]
+notNan3.3<-userExample3.3[!is.na(test[512,])]
+best_films_userExample3.3<-match(sort(notNan3.3[notNan3.3>4],decreasing=T),userExample3.3)
+bestFilmsIndex3.3<-item_order[best_films_userExample3.3]
+
+bestFilmsNames3.3<-movies[match(bestFilmsIndex3.3,movies[,1]),2:3]
+print(bestFilmsNames3.3)
+
+```
+
+```{r}
+print(movies[match(item_order[tail(sort(pred1[1,],index.return=TRUE)$ix)],
+                   movies[,1]),2:3])
+print(movies[match(item_order[tail(sort(pred2[1,],index.return=TRUE)$ix)],
+                   movies[,1]),2:3])
+print(movies[match(item_order[tail(sort(pred3[1,],index.return=TRUE)$ix)],
+                   movies[,1]),2:3])
+
+
+print(movies[match(item_order[tail(sort(pred1[315,],index.return=TRUE)$ix)],
+                   movies[,1]),2:3])
+print(movies[match(item_order[tail(sort(pred2[315,],index.return=TRUE)$ix)],
+                   movies[,1]),2:3])
+print(movies[match(item_order[tail(sort(pred3[315,],index.return=TRUE)$ix)],
+                   movies[,1]),2:3])
+
+
+
+print(movies[match(item_order[tail(sort(pred1[512,],index.return=TRUE)$ix)],
+                   movies[,1]),2:3])
+print(movies[match(item_order[tail(sort(pred2[512,],index.return=TRUE)$ix)],
+                   movies[,1]),2:3])
+print(movies[match(item_order[tail(sort(pred3[512,],index.return=TRUE)$ix)],
+                   movies[,1]),2:3])
+
+
+```
+
+### 2. Prueba con un paquete ya existente
+
+En este apartado se realiza un filtrado de los datos haciendo uso de un paquete ya existente para así comprobar cómo de bueno es el sistema de recomendación implementado respecto a este.
+
+```{r load recommenderlab,warning=FALSE,include=FALSE}
+library(recommenderlab)
+```
+
+```{r execute recommenderlab}
+train2<-as(train,"realRatingMatrix")
+test2<-as(test,"realRatingMatrix")
+recom<-Recommender(train2,method="SVDF")
+
+lab_pred <- predict(recom, test2,type="ratingMatrix")
+
+rat_pred<-as(lab_pred, "matrix")
+
+cat("RECM: ",sqrt(mean((test[!is.na(test)]-rat_pred[!is.na(test)])**2)),"\n")
+cat("Correlación: ",cor(test[!is.na(test)],rat_pred[!is.na(test)]))
+```
+
+
+
+
+
+### 1.a Comparación de modelos según número de factores, tamaño de los conjuntos de train y test y actualización del factor de aprendizaje
+
+Aquí se presentan tres modelos según el tamaño de los conjuntos de entenamiento y test. Los tamaños del test que se prueban son 10\%, 25\% y 50\% del archivo general. Además se ejecutarán dos versiones de cada uno de ellos, uno en el que se va actualizando el factor de aprendizaje multiplicándolo por un valor y otro en el que se mantiene constante este valor. Se especifican 50 iteraciones (épocas) y se prueba cada modelo con 5, 30 y 100 factores. Por último, se inicializan los valores del factor de aprendizaje ($\gamma$) y la constante de regularización ($\lambda$).
+\break
+
+Para cada modelo, se hallan las predicciones y la correlación entre estas y el test además de crear un gráfico en el que se muestre la evolución del RECM para cada factor.
+
+```{r train and test}
+train_test1<-funcion_train_test(ratings,n,m,0.1)
+train1<-train_test1[[1]]
+test1<-train_test1[[2]]
+
+train_test2<-funcion_train_test(ratings,n,m,0.25)
+train2<-train_test2[[1]]
+test2<-train_test2[[2]]
+
+train_test3<-funcion_train_test(ratings,n,m,0.5)
+train3<-train_test3[[1]]
+test3<-train_test3[[2]]
+
+```
+
+```{r parameters}
+steps<-50
+factors<-c(5,30,100)
+gamma<-0.015
+lambda<-0.15
+mult<-0.99
+```
+
+#### 1.1.1
+```{r execution 1}
+results1_1<-algorithm(train1,test1,steps,factors,gamma,lambda,n,m,mult)
+error1_1<-results1_1[[1]]
+u1_1<-results1_1[[2]]
+v1_1<-results1_1[[3]]
+mu1_1<-results1_1[[4]]
+bi1_1<-results1_1[[5]]
+bj1_1<-results1_1[[6]]
+```
+
+```{r prediction 1}
+predicted1_1<-pred(u1_1,v1_1,mu1_1,bi1_1,bj1_1)
+corr1_1<-cor(test1[!is.na(test1)],predicted1_1[!is.na(test1)])
+```
+
+```{r graphs 1,echo=F}
+plot(1:steps,type='n', main="Comparación de errores según nº de factores",
+   ylab = "RECM", xlab="Iteraciones",ylim=c(0.82,1.28))
+
+legend("topright", inset=.02,legend=paste(factors,"factores"), fill=c(2,3,4), cex=0.8)
+lines(1:steps,error1_1[1,],col=2, lwd=1.5)
+lines(1:steps,error1_1[2,],col=3, lwd=1.5)
+lines(1:steps,error1_1[3,],col=4, lwd=1.5)
+```
+
+#### 1.1.2
+```{r execution 2}
+results1_2<-algorithm(train1,test1,steps,factors,gamma,lambda,n,m,1)
+error1_2<-results1_2[[1]]
+u1_2<-results1_2[[2]]
+v1_2<-results1_2[[3]]
+mu1_2<-results1_2[[4]]
+bi1_2<-results1_2[[5]]
+bj1_2<-results1_2[[6]]
+```
+
+```{r prediction 2}
+predicted1_2<-pred(u1_2,v1_2,mu1_2,bi1_2,bj1_2)
+corr1_2<-cor(test1[!is.na(test1)],predicted1_2[!is.na(test1)])
+```
+
+```{r graphs 2,echo=FALSE}
+plot(1:steps,type='n', main="Comparación de errores según nº de factores",
+   ylab = "RECM", xlab="Iteraciones",ylim=c(0.82,1.28))
+
+legend("topright", inset=.02,legend=paste(factors,"factores"), fill=c(2,3,4), cex=0.8)
+lines(1:steps,error1_2[1,],col=2, lwd=1.5)
+
+lines(1:steps,error1_2[2,],col=3, lwd=1.5)
+lines(1:steps,error1_2[3,],col=4, lwd=1.5)
+```
+
+#### 1.2.1
+```{r execution 3}
+results2_1<-algorithm(train2,test2,steps,factors,gamma,lambda,n,m,mult)
+error2_1<-results2_1[[1]]
+u2_1<-results2_1[[2]]
+v2_1<-results2_1[[3]]
+mu2_1<-results2_1[[4]]
+bi2_1<-results2_1[[5]]
+bj2_1<-results2_1[[6]]
+```
+
+```{r predictions 3}
+predicted2_1<-pred(u2_1,v2_1,mu2_1,bi2_1,bj2_1)
+corr2_1<-cor(test2[!is.na(test2)],predicted2_1[!is.na(test2)])
+```
+
+```{r graph 3,echo=FALSE}
+plot(1:steps,type='n', main="Comparación de errores según nº de factores",
+   ylab = "RECM", xlab="Iteraciones",ylim=c(0.83,1.35))
+
+legend("topright", inset=.02,legend=paste(factors,"factores"), fill=c(2,3,4), cex=0.8)
+lines(1:steps,error2_1[1,],col=2, lwd=1.5)
+
+legend("topright", inset=.02,legend=paste(factors,"factores"), fill=c(2,3,4), cex=0.8)
+
+lines(1:steps,error2_1[2,],col=3, lwd=1.5)
+lines(1:steps,error2_1[3,],col=4, lwd=1.5)
+```
+
+#### 1.2.2
+```{r execution 4}
+results2_2<-algorithm(train2,test2,steps,factors,gamma,lambda,n,m,1)
+error2_2<-results2_2[[1]]
+u2_2<-results2_2[[2]]
+v2_2<-results2_2[[3]]
+mu2_2<-results2_2[[4]]
+bi2_2<-results2_2[[5]]
+bj2_2<-results2_2[[6]]
+```
+
+```{r predictions 4}
+predicted2_2<-pred(u2_2,v2_2,mu2_2,bi2_2,bj2_2)
+corr2_2<-cor(test2[!is.na(test2)],predicted2_2[!is.na(test2)])
+```
+
+```{r graph 4, echo=FALSE}
+plot(1:steps,type='n', main="Comparación de errores según nº de factores",
+   ylab = "RECM", xlab="Iteraciones",ylim=c(0.83,1.35))
+
+legend("topright", inset=.02,legend=paste(factors,"factores"), fill=c(2,3,4), cex=0.8)
+lines(1:steps,error2_2[1,],col=2, lwd=1.5)
+#legend("right",inset=.02, legend=c("Test", "Train"), lty=1:2, cex=0.8)
+
+lines(1:steps,error2_2[2,],col=3, lwd=1.5)
+lines(1:steps,error2_2[3,],col=4, lwd=1.5)
+```
+
+#### 1.2.1
+```{r execution 5}
+results3_1<-algorithm(train3,test3,steps,factors,gamma,lambda,n,m,mult)
+error3_1<-results3_1[[1]]
+u3_1<-results3_1[[2]]
+v3_1<-results3_1[[3]]
+mu3_1<-results3_1[[4]]
+bi3_1<-results3_1[[5]]
+bj3_1<-results3_1[[6]]
+```
+
+```{r predictions 5}
+predicted3_1<-pred(u3_1,v3_1,mu3_1,bi3_1,bj3_1)
+corr3_1<-cor(test3[!is.na(test3)],predicted3_1[!is.na(test3)])
+```
+
+```{r graph 5,echo=FALSE}
+plot(1:steps,type='n', main="Comparación de errores según nº de factores",
+   ylab = "RECM", xlab="Iteraciones",ylim=c(0.84,1.4))
+
+legend("topright", inset=.02,legend=paste(factors,"factores"), fill=c(2,3,4), cex=0.8)
+lines(1:steps,error3_1[1,],col=2, lwd=1.5)
+
+lines(1:steps,error3_1[2,],col=3, lwd=1.5)
+lines(1:steps,error3_1[3,],col=4, lwd=1.5)
+```
+
+#### 1.2.2
+```{r execution 6}
+results3_2<-algorithm(train3,test3,steps,factors,gamma,lambda,n,m,1)
+error3_2<-results3_2[[1]]
+u3_2<-results3_2[[2]]
+v3_2<-results3_2[[3]]
+mu3_2<-results3_2[[4]]
+bi3_2<-results3_2[[5]]
+bj3_2<-results3_2[[6]]
+```
+
+```{r predictions 6}
+predicted3_2<-pred(u3_2,v3_2,mu3_2,bi3_2,bj3_2)
+corr3_2<-cor(test3[!is.na(test3)],predicted3_2[!is.na(test3)])
+```
+
+```{r graph 6,echo=FALSE}
+plot(1:steps,type='n', main="Comparación de errores según nº de factores",
+   ylab = "RECM", xlab="Iteraciones",ylim=c(0.84,1.4))
+
+legend("topright", inset=.02,legend=paste(factors,"factores"), fill=c(2,3,4), cex=0.8)
+lines(1:steps,error3_2[1,],col=2, lwd=1.5)
+lines(1:steps,error3_2[2,],col=3, lwd=1.5)
+lines(1:steps,error3_2[3,],col=4, lwd=1.5)
+```
+
+
